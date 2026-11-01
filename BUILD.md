@@ -1,7 +1,56 @@
 # AX5 定制固件 —— Linux 容器编译作业书
 
 > 给容器里的 agent：照本文档顺序执行即可。所有命令都已实测校验。
-> 一键脚本：`build-on-linux.sh`（可直接 `bash build-on-linux.sh`）
+> 两个脚本：
+> - `fast-patch.sh` —— 改现成固件，**10-30 分钟**（优先试这个）
+> - `build-on-linux.sh` —— 从源码完整编译，**2-5 小时**（兜底）
+
+---
+
+## 零、先选路径（三条，按速度排序）
+
+| 方案 | 耗时 | 原理 | 前提 | 风险 |
+|---|---|---|---|---|
+| **A. 改现成固件** `fast-patch.sh` | **10–30 分钟** | 解包已编译好的 `libwrt-ax5-nowifi.ubi`（54.4 MB，已内置 OpenClash），把首启预置脚本塞进 squashfs，重新 ubinize | 需要一个现成 ubi + squashfs-tools + mtd-utils | 中：重打包的 UBI 参数若不匹配会起不来（U-Boot 可救） |
+| **B. 完整编译** `build-on-linux.sh` | **2–5 小时** | 从源码交叉编译工具链 + 内核 + 100+ 包 | 磁盘 35 GB、内存 6 GB | 低：标准流程，产物可控 |
+| **C. ImageBuilder** | 15–40 分钟 | 用官方预编译 ipk 组装，不编译任何包 | **需要匹配 target/subtarget/profile 的 ImageBuilder** | 低 |
+| **D. ccache 二次编译** | 1–1.5 小时 | 缓存上次编译的 .o 文件 | 必须先完整编过一次 | 低 |
+
+### 为什么 A 可行
+
+`libwrt-ax5-nowifi.ubi` 是同一套源码（`King-Of-Knights/openwrt-6.x`）**已经编译完成的产物**，里面 OpenClash、bash、curl、dnsmasq-full 全都有。它唯一的问题是默认 IP 是 `192.168.6.1` —— 而书房电脑只有 WiFi，够不到这个地址。
+
+`squashfs` 是只读文件系统，但 `/etc/uci-defaults/` 里的脚本会在**首次启动时执行**。只要把它塞进去，设备起来后自己就把 IP 改成 `192.168.5.250` 了。**完全不需要重新编译。**
+
+### 为什么 A 有风险
+
+重新 `ubinize` 时，PEB 大小（128 KiB）、LEB 大小（126976）、min_io（2048）、subpage（2048）必须和 NAND 硬件严格匹配。脚本里用的就是 AX5 的标准值，但仍在容器里验证过才保险。
+
+**失败了也不要紧**：U-Boot 在（`0:APPSBL` 分区今晚已确认未变动），搬回书房 + WAN 口 + RESET 15 秒就能重刷完整编译版。
+
+### 推荐执行顺序
+
+```bash
+# 1) 先把现成固件和两个脚本拉下来
+curl -fL -o libwrt-ax5-nowifi.ubi \
+  https://ghproxy.com/https://github.com/zongheng23333/IPQ/releases/download/IPQ60XX-nowifi/libwrt-qualcommax-ipq60xx-redmi_ax5-squashfs-factory.ubi
+curl -fsSL -o fast-patch.sh  https://raw.githubusercontent.com/hx-design/IPQ/main/fast-patch.sh
+curl -fsSL -o build-on-linux.sh https://raw.githubusercontent.com/hx-design/IPQ/main/build-on-linux.sh
+
+# 2) 先试快方案（失败不影响，继续走 3）
+bash fast-patch.sh libwrt-ax5-nowifi.ubi libwrt-ax5-custom.ubi || echo "方案A失败，转完整编译"
+
+# 3) 兜底：完整编译（可以和第 2 步并行跑，互不干扰）
+bash build-on-linux.sh
+```
+
+> 如果容器核数和磁盘都够，**建议 2 和 3 并行**：`build-on-linux.sh` 在后半夜慢慢跑，`fast-patch.sh` 十分钟出结果先用着。
+
+### C/ImageBuilder 的现状（我查过，暂时不可用）
+
+官方 `downloads.openwrt.org` 的 ImageBuilder 只覆盖官方支持的设备。**Redmi AX5 (RA67) 不在官方支持列表**（OpenWrt 官方明确说 256 MB 内存不支持，且"大概率永远不支持"），所以没有现成的 `qualcommax/ipq60xx` ImageBuilder 能选到 AX5 profile。
+
+第三方项目（`xianfanjie/OpenWrt_qualcommax_ipq60xx`、`openwrt.ai`）提供在线定制，但需要注册账号，且它们的 target 与我们的 `King-Of-Knights/openwrt-6.x` 源码不一致，**产出的固件不能保证和现有 U-Boot/分区表兼容**。不是首选。
 
 ---
 
