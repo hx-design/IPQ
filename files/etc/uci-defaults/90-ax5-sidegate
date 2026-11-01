@@ -1,0 +1,79 @@
+#!/bin/sh
+# ============================================================
+# AX5 side-gateway preset  (runs once on first boot)
+#
+# Goal: after flashing, the box is ALREADY a working side-gateway
+#       reachable at 192.168.5.250 from the main LAN.
+#       No serial console, no direct-ethernet session, no U-Boot.
+#
+# Why: the stock image boots at 192.168.6.1 with DHCP + firewall on,
+#      which is unreachable from the main router's 192.168.5.x subnet.
+#      This script rewrites that before the network comes up.
+# ============================================================
+
+logger -t ax5-preset "starting side-gateway preset"
+
+# ---------- 1. locate the br-lan device section ----------
+DEV_IDX=""
+i=0
+while [ $i -le 7 ]; do
+    if [ "$(uci -q get network.@device[$i].name)" = "br-lan" ]; then
+        DEV_IDX=$i
+        break
+    fi
+    i=$((i + 1))
+done
+logger -t ax5-preset "br-lan device index = ${DEV_IDX:-none}"
+
+# ---------- 2. put every physical port into the LAN bridge ----------
+# The WAN/LAN port mapping on this image may differ from the vendor
+# firmware. Bridging all ports means ANY cable position works.
+if [ -n "$DEV_IDX" ]; then
+    EXIST=$(uci -q get network.@device[$DEV_IDX].ports)
+    for p in /sys/class/net/eth*; do
+        [ -e "$p" ] || continue
+        pn=$(basename "$p")
+        echo "$EXIST" | grep -qw "$pn" || uci add_list network.@device[$DEV_IDX].ports="$pn"
+    done
+fi
+
+# ---------- 3. LAN interface: static address in the main subnet ----------
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.5.250'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.gateway='192.168.5.1'
+uci -q delete network.lan.dns
+uci add_list network.lan.dns='192.168.5.1'
+uci commit network
+
+# ---------- 4. drop WAN, a side-gateway does not dial out ----------
+uci -q delete network.wan
+uci -q delete network.wan6
+uci commit network
+
+# ---------- 5. no DHCP server: the main router keeps serving the LAN ----------
+uci set dhcp.lan.ignore='1'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ra='disabled'
+uci commit dhcp
+
+# ---------- 6. dnsmasq stays up for DNS only ----------
+uci -q delete dhcp.@dnsmasq[0].server
+uci add_list dhcp.@dnsmasq[0].server='192.168.5.1'
+uci add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+uci set dhcp.@dnsmasq[0].noresolv='0'
+uci commit dhcp
+
+# ---------- 7. firewall off (single-arm side-gateway) ----------
+/etc/init.d/firewall disable
+/etc/init.d/firewall stop
+
+# ---------- 8. enable forwarding for clients that use us as gateway ----------
+sysctl -w net.ipv4.ip_forward=1
+
+# ---------- 9. root password ----------
+echo 'root:hx199591' | chpasswd
+
+logger -t ax5-preset "done: http://192.168.5.250"
+
+exit 0
